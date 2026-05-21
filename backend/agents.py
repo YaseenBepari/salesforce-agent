@@ -7,6 +7,7 @@ from .salesforce_client import SalesforceClient
 from .database import log_audit_event, save_chat_message
 
 # We load environment variables for API keys
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "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")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
@@ -224,7 +225,7 @@ You can ask me questions about:
 
 def execute_llm_stream(org_client: SalesforceClient, current_page: Dict[str, Any], query: str, history: List[Dict[str, str]] = None) -> Generator[str, None, None]:
     """
-    Executes a streaming query against OpenAI or Anthropic if keys are present.
+    Executes a streaming query against Nvidia NIM, OpenAI, or Anthropic if keys are present.
     If no keys are found, it falls back to the high-performance local simulated AI responses.
     """
     # 1. Identify active agent role
@@ -237,7 +238,10 @@ def execute_llm_stream(org_client: SalesforceClient, current_page: Dict[str, Any
     has_api = False
     
     # Let's inspect the active configuration keys
-    if OPENAI_API_KEY:
+    if NVIDIA_API_KEY:
+        has_api = True
+        llm_type = "nvidia"
+    elif OPENAI_API_KEY:
         has_api = True
         llm_type = "openai"
     elif ANTHROPIC_API_KEY:
@@ -249,51 +253,51 @@ def execute_llm_stream(org_client: SalesforceClient, current_page: Dict[str, Any
     # LOGGING
     print(f"[COPILOT ROUTER] Routing query to Agent: {agent_type} (LLM Engine: {llm_type})")
     
+    # We also check for actionable intents to attach quick action banners
+    action_payload = None
+    q_lower = query.lower()
+    if "create" in q_lower and "user" in q_lower:
+        action_payload = {
+            "action": "APPROVAL_REQUIRED",
+            "action_type": "CREATE_USER",
+            "description": "Create a new simulated Salesforce user",
+            "payload": {
+                "Username": "new.user@antigravity.demo",
+                "LastName": "SimulatedUser",
+                "Email": "new.user@antigravity.demo",
+                "ProfileId": "00e800000002ghi", # Standard User
+                "Alias": "simuser",
+                "TimeZoneSidKey": "America/Los_Angeles",
+                "LocaleSidKey": "en_US",
+                "EmailEncodingKey": "UTF-8",
+                "LanguageLocaleKey": "en_US"
+            }
+        }
+    elif "clone" in q_lower or "permission" in q_lower:
+        action_payload = {
+            "action": "APPROVAL_REQUIRED",
+            "action_type": "CLONE_PERMISSIONS",
+            "description": "Clone permissions from Admin to Sales Rep",
+            "payload": {
+                "sourceUserId": "00580000000a111", # Admin
+                "targetUserId": "00580000000a222"  # Sales Rep
+            }
+        }
+    elif "soql" in q_lower or "run" in q_lower:
+        action_payload = {
+            "action": "APPROVAL_REQUIRED",
+            "action_type": "RUN_SOQL",
+            "description": "Execute read-only SOQL query on active accounts",
+            "payload": {
+                "query": "SELECT Name, AnnualRevenue, VIP_Status__c FROM Account WHERE VIP_Status__c = true"
+            }
+        }
+
     # 4. Fallback if simulated
     if llm_type == "simulated":
         # Simulate typing/streaming response
         response_text = get_simulated_ai_response(agent_type, query, screen_context)
         
-        # We also check for actionable intents to attach quick action banners
-        action_payload = None
-        q_lower = query.lower()
-        if "create" in q_lower and "user" in q_lower:
-            action_payload = {
-                "action": "APPROVAL_REQUIRED",
-                "action_type": "CREATE_USER",
-                "description": "Create a new simulated Salesforce user",
-                "payload": {
-                    "Username": "new.user@antigravity.demo",
-                    "LastName": "SimulatedUser",
-                    "Email": "new.user@antigravity.demo",
-                    "ProfileId": "00e800000002ghi", # Standard User
-                    "Alias": "simuser",
-                    "TimeZoneSidKey": "America/Los_Angeles",
-                    "LocaleSidKey": "en_US",
-                    "EmailEncodingKey": "UTF-8",
-                    "LanguageLocaleKey": "en_US"
-                }
-            }
-        elif "clone" in q_lower or "permission" in q_lower:
-            action_payload = {
-                "action": "APPROVAL_REQUIRED",
-                "action_type": "CLONE_PERMISSIONS",
-                "description": "Clone permissions from Admin to Sales Rep",
-                "payload": {
-                    "sourceUserId": "00580000000a111", # Admin
-                    "targetUserId": "00580000000a222"  # Sales Rep
-                }
-            }
-        elif "soql" in q_lower or "run" in q_lower:
-            action_payload = {
-                "action": "APPROVAL_REQUIRED",
-                "action_type": "RUN_SOQL",
-                "description": "Execute read-only SOQL query on active accounts",
-                "payload": {
-                    "query": "SELECT Name, AnnualRevenue, VIP_Status__c FROM Account WHERE VIP_Status__c = true"
-                }
-            }
-
         # Stream the mock response
         chunk_size = 40
         for i in range(0, len(response_text), chunk_size):
@@ -317,7 +321,29 @@ def execute_llm_stream(org_client: SalesforceClient, current_page: Dict[str, Any
 
     # 6. API call execution
     try:
-        if llm_type == "openai":
+        if llm_type == "nvidia":
+            client = OpenAI(
+                base_url="https://integrate.api.nvidia.com/v1",
+                api_key=NVIDIA_API_KEY
+            )
+            stream = client.chat.completions.create(
+                model="openai/gpt-oss-120b",
+                messages=[{"role": "system", "content": system_content}] + messages,
+                temperature=1,
+                top_p=1,
+                max_tokens=4096,
+                stream=True
+            )
+            for chunk in stream:
+                if not getattr(chunk, "choices", None):
+                    continue
+                reasoning = getattr(chunk.choices[0].delta, "reasoning_content", None)
+                if reasoning:
+                    yield f"data: {json.dumps({'content': reasoning})}\n\n"
+                if chunk.choices and chunk.choices[0].delta.content is not None:
+                    yield f"data: {json.dumps({'content': chunk.choices[0].delta.content})}\n\n"
+                    
+        elif llm_type == "openai":
             client = OpenAI(api_key=OPENAI_API_KEY)
             stream = client.chat.completions.create(
                 model="gpt-4-turbo-preview",
@@ -349,3 +375,7 @@ def execute_llm_stream(org_client: SalesforceClient, current_page: Dict[str, Any
         response_text = get_simulated_ai_response(agent_type, query, screen_context)
         for i in range(0, len(response_text), 20):
             yield f"data: {json.dumps({'content': response_text[i:i+20]})}\n\n"
+            
+    # Yield the structured action if detected and LLM call completed
+    if action_payload:
+        yield f"data: {json.dumps(action_payload)}\n\n"
