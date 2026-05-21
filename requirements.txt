@@ -1,0 +1,9 @@
+fastapi==0.110.0
+uvicorn==0.28.0
+pydantic==2.6.4
+requests==2.31.0
+simple-salesforce==1.12.5
+openai==1.14.1
+anthropic==0.21.0
+python-dotenv==1.0.1
+cryptography==42.0.5
